@@ -1,5 +1,7 @@
-// Offline tests for mermail-countersig: payout gate policy and red-team cases against a local mock JSON-RPC.
+// Offline tests for mermail-countersig: payout gate policy, red-team cases against a local mock JSON-RPC,
+// and a golden corpus of real Solana devnet and Base Sepolia responses.
 // Run: node tests/countersig.mjs  (also part of npm test; no network, no keys)
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { challenge, checkReceipt, gate, lookalikes, receipt, receiptMemo, verify } from "../skills/mermail-countersig/scripts/countersig.mjs";
 import { findEvmProof } from "../skills/mermail-countersig/scripts/evm.mjs";
@@ -171,6 +173,42 @@ const unitCases = [];
   unitCases.push(["challenge refuses more than one recipient", threw, true]);
 }
 
+// ---------- golden corpus ----------
+// Real Solana devnet and Base Sepolia RPC responses (tests/fixtures/countersig-golden.json), replayed offline.
+// A request that was not recorded fails the case, so a behaviour change cannot pass silently.
+const golden = JSON.parse(await readFile(new URL("./fixtures/countersig-golden.json", import.meta.url), "utf8"));
+const goldenCases = [];
+{
+  const unrecorded = [];
+  const replay = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const net = req.url.includes("base") ? "base" : "solana";
+    const { method, params } = JSON.parse(body);
+    const k = `${method} ${JSON.stringify(params)}`;
+    res.setHeader("content-type", "application/json");
+    if (!(k in golden.responses[net])) {
+      unrecorded.push(k.slice(0, 80));
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32000, message: "not in golden corpus" } }));
+      return;
+    }
+    res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: golden.responses[net][k] }));
+  });
+  await new Promise((ok) => replay.listen(0, "127.0.0.1", ok));
+  const port = replay.address().port;
+  for (const c of golden.cases) {
+    let verdict;
+    try {
+      verdict = (await verify({ ...c.input, rpc: `http://127.0.0.1:${port}/${c.net}`, now: c.now })).verdict;
+    } catch (error) {
+      verdict = `error: ${error.message}`;
+    }
+    goldenCases.push([`golden ${c.name}`, verdict, c.expected]);
+  }
+  replay.close();
+  goldenCases.push(["golden corpus needed no unrecorded RPC call", unrecorded.length, 0]);
+}
+
 let failed = 0;
 const report = (label, rows, pick) => {
   for (const row of rows) {
@@ -183,6 +221,7 @@ const report = (label, rows, pick) => {
 report("gate", gateCases, ([name, input, expected]) => [name, gate({ ...input, now: NOW }).decision, expected]);
 report("red-team", attackCases, (r) => r);
 report("format", unitCases, (r) => r);
-const total = gateCases.length + attackCases.length + unitCases.length;
-console.log(`Countersig: ${total - failed} of ${total} checks pass (${gateCases.length} gate, ${attackCases.length} red-team, ${unitCases.length} format).`);
+report("golden", goldenCases, (r) => r);
+const total = gateCases.length + attackCases.length + unitCases.length + goldenCases.length;
+console.log(`Countersig: ${total - failed} of ${total} checks pass (${gateCases.length} gate, ${attackCases.length} red-team, ${unitCases.length} format, ${goldenCases.length} golden).`);
 process.exitCode = failed ? 1 : 0;
