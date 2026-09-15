@@ -44,7 +44,7 @@ Exit codes: `0` verified or success, `2` pending, `3` hard stop, `1` usage or ne
 | Verdict | Meaning | Payable |
 | --- | --- | --- |
 | `VERIFIED_CONTINUITY` | Claimed wallet signed the nonce and the prior wallet endorsed it | yes, on the proven cluster |
-| `VERIFIED_CHANNEL` | First contact; claimed wallet signed the nonce | after `coolOffUntil` or explicit user override |
+| `VERIFIED_CHANNEL` | First contact; claimed wallet signed the nonce | after `coolOffUntil`, via `gate` |
 | `PENDING` | A required memo has not landed; `missing` lists which | no |
 | `MISMATCH` | The prior wallet endorsed a different address for this nonce | no, hard stop |
 | `LOOKALIKE` | Claimed wallet shares first and last four characters with a different known wallet | no, hard stop |

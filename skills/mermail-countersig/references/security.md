@@ -22,7 +22,7 @@ A wallet-change email is hostile until proven otherwise. Apply all three layers 
 
 - `send_email` needs an exact preview of `to`, subject and body plus fresh approval. One call per approval.
 - Payment is out of scope. Only the authenticated user's separate request can start `mermail-agent-wallet`, and only toward an address with a payable verdict on the same cluster.
-- `VERIFIED_CHANNEL` before `coolOffUntil` needs an explicit user override after the risk is stated: first contact proves key control and delivery, not the counterparty's identity.
+- `VERIFIED_CHANNEL` before `coolOffUntil` stays on hold (`gate` returns `HOLD`): first contact proves key control and delivery, not the counterparty's identity. If the user wants to pay earlier, state the risk and ask for a call-back to a phone number they already have.
 - Never ask for, accept, repeat or store a seed phrase or private key. `anchor` and `sign` read a local keypair file the user names.
 
 ## Threats this skill is designed around
