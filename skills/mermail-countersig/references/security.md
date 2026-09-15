@@ -48,6 +48,6 @@ A wallet-change email is hostile until proven otherwise. Apply all three layers 
 
 ## Bounds
 
-- Verify once per user request or resumed turn; never loop on Solana RPC.
+- Verify once per user request or resumed turn; never loop on chain RPC.
 - Scan at most 200 recent signatures per wallet.
 - Stop when inputs are ambiguous and ask with non-secret metadata.

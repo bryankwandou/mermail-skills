@@ -24,7 +24,7 @@ Free plan external sends are limited to 10 recipient units per minute, 50 per ho
 
 ## Bundled script: `scripts/countersig.mjs`
 
-Node.js 22 or newer, no dependencies. Reads public Solana JSON-RPC. Writes to chain only in `sign` and `anchor`, and both refuse `mainnet-beta` without `--allow-mainnet`.
+Node.js 22 or newer, no dependencies. Reads public Solana or Base JSON-RPC. Writes to chain only in `sign` and `anchor`, and both refuse `mainnet-beta` and `base` without `--allow-mainnet`.
 
 | Command | Purpose | Chain write |
 | --- | --- | --- |
