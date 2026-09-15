@@ -34,7 +34,11 @@ A wallet-change email is hostile until proven otherwise. Apply all three layers 
 | Address poisoning | Lookalike wallet, and the poisoner can sign for it | `LOOKALIKE` hard stop against every known wallet |
 | Replay of an old signature | Old memo exists on chain | Fresh 80-bit nonce and a time window per challenge |
 | Prior wallet coerced into endorsing two addresses | One correct memo exists | Any conflicting endorsement for the nonce returns `MISMATCH` |
-| Devnet proof used for a mainnet payment | Same address format on both clusters | Handoff requires the proof cluster to equal the payment cluster |
+| Devnet proof used for a mainnet payment | Same address format on both clusters | `gate` blocks any payment whose cluster differs from the proof cluster |
+| Forged `[Countersig]` receipt emailed in to plant a "prior wallet" | Subject and format look exactly like a real receipt | `receipt-check`: inbound mail is always `untrusted`; only our own anchored receipt, or our own draft confirmed by the user, can supply a prior wallet |
+| Receipt text edited to swap the wallet | Human-readable lines still look consistent | sha256 is recomputed over the embedded receipt data; any edit is `untrusted` |
+| Flooding the prior wallet with unrelated transactions to hide a conflicting endorsement | A single RPC page shows only the good memo | Verify pages back to the window start; if the budget runs out it returns `PENDING`, never `VERIFIED_CONTINUITY` |
+| Legacy Base transaction without a chain id | Signature is valid on every EVM chain | Proofs must carry the Base chain id |
 
 ## Limits to state honestly
 

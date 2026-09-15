@@ -30,6 +30,7 @@ Node.js 22 or newer, no dependencies. Reads public Solana JSON-RPC. Writes to ch
 | --- | --- | --- |
 | `challenge --claimed --channel [--prior] [--counterparty] [--cluster] [--ttl-hours 72] [--out]` | Create nonce, memo strings, signer link, and the email subject, text and HTML | no |
 | `verify --challenge-file [--known a,b] [--rpc] [--out]` | Search the claimed and prior wallets for exact memos inside the window and return a verdict | no |
+| `receipt-check --text-file --origin draft|sent|inbound [--anchor-wallet] [--cluster]` | Decide whether a stored receipt may supply a prior wallet: `anchored` (exit 0), `self_written_unanchored` (exit 2, user must confirm), `untrusted` (exit 3) | no |
 | `gate --verdict-file --amount-usd [--payment-cluster] [--destination] [--history-file] [--callback-confirmed] [--continuity-unavailable --second-channel-at <iso>] [--out]` | Apply the payout policy to a verdict and the user's intended payment. Returns `ALLOW_WITH_USER_APPROVAL` (exit 0), `HOLD` (exit 2) or `BLOCK` (exit 3) with reasons. `--history-file` is a JSON array of `{to, amountUsd, at}` for earlier payments | no |
 | `receipt --verdict-file --challenge-file [--out]` | Build a canonical receipt, its sha256, and draft text | no |
 | `anchor --receipt-file --keypair [--cluster devnet]` | Write `countersig:v1:receipt:<sha256>` as a memo | yes |
