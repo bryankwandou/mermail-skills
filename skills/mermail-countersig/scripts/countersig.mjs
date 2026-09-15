@@ -384,6 +384,88 @@ export function receipt(verdict, challengeRecord) {
   return { receipt: body, sha256, subject: `[Countersig] ${body.verdict} ${body.counterparty ?? body.channel} ${body.claimed.slice(0, 4)}...${body.claimed.slice(-4)}`, text: lines.join("\n") };
 }
 
+// ---------- payout gate ----------
+// Turns a verdict plus the user's intended payment into ALLOW_WITH_USER_APPROVAL, HOLD or BLOCK.
+// It never approves on its own: the best outcome still needs the user's explicit yes in mermail-agent-wallet.
+export const CALLBACK_THRESHOLD_USD = 1000;
+export const SPLIT_WINDOW_DAYS = 7;
+export const LOST_WALLET_HOLD_H = 72;
+export const VERDICT_MAX_AGE_H = 24;
+const TESTNETS = new Set(["devnet", "testnet", "base-sepolia"]);
+
+export function gate({ verdict, amountUsd, paymentCluster, destination, history = [], callbackConfirmed = false, secondChannelAt = null, continuityUnavailable = false, now = Date.now() }) {
+  const reasons = [];
+  const nowS = Math.floor(now / 1000);
+  const amount = Number(amountUsd);
+  const payCluster = paymentCluster ?? verdict?.cluster;
+  const result = (decision, extra = {}) => ({
+    type: "countersig.gate",
+    version: VERSION,
+    decision,
+    destination: verdict?.claimed ?? null,
+    cluster: payCluster ?? null,
+    amountUsd: Number.isFinite(amount) ? amount : null,
+    reasons,
+    ...extra,
+  });
+
+  if (!verdict || verdict.type !== "countersig.verdict") return (reasons.push("input is not a countersig verdict"), result("BLOCK"));
+  if (!Number.isFinite(amount) || amount <= 0) return (reasons.push("amount must come from the user as a positive USD figure"), result("BLOCK"));
+  if (destination && !sameAddress(destination, verdict.claimed)) {
+    reasons.push("payment destination differs from the verified wallet");
+    return result("BLOCK");
+  }
+  if (["MISMATCH", "LOOKALIKE"].includes(verdict.verdict)) return (reasons.push(`${verdict.verdict} is a hard stop`), result("BLOCK"));
+  if (["EXPIRED", "INVALID_ADDRESS", "INVALID_INPUT"].includes(verdict.verdict)) return (reasons.push(`${verdict.verdict}: issue a new challenge`), result("BLOCK"));
+  if (verdict.verdict === "UNCHANGED") return (reasons.push("wallet unchanged; normal payment approval applies"), result("ALLOW_WITH_USER_APPROVAL"));
+  if (verdict.verdict === "PENDING") return (reasons.push(`proof incomplete: ${(verdict.missing ?? []).join(", ") || "missing rung"}`), result("HOLD"));
+
+  if (payCluster !== verdict.cluster) {
+    const rehearsal = TESTNETS.has(verdict.cluster) && !TESTNETS.has(payCluster);
+    reasons.push(rehearsal ? `a ${verdict.cluster} proof is a rehearsal and cannot unlock a ${payCluster} payment` : `proof is on ${verdict.cluster} but payment is on ${payCluster}`);
+    return result("BLOCK");
+  }
+  const checkedS = Math.floor(Date.parse(verdict.checkedAt) / 1000);
+  if (!Number.isFinite(checkedS) || nowS - checkedS > VERDICT_MAX_AGE_H * 3600) {
+    reasons.push(`verdict is older than ${VERDICT_MAX_AGE_H} h; run verify again before paying`);
+    return result("HOLD");
+  }
+
+  const windowStart = nowS - SPLIT_WINDOW_DAYS * 86400;
+  const recent = history.filter((h) => sameAddress(String(h.to ?? ""), verdict.claimed) && Math.floor(Date.parse(h.at) / 1000) >= windowStart);
+  const totalUsd7d = recent.reduce((sum, h) => sum + (Number(h.amountUsd) || 0), amount);
+  const extra = { totalUsd7d, priorPayments7d: recent.length };
+
+  if (verdict.verdict === "VERIFIED_CONTINUITY") {
+    reasons.push("new wallet signed and the prior wallet countersigned");
+    return result("ALLOW_WITH_USER_APPROVAL", extra);
+  }
+
+  // VERIFIED_CHANNEL: first contact, or continuity unavailable because the old key is lost
+  const holds = [];
+  if (verdict.coolOffUntil && Date.parse(verdict.coolOffUntil) > now) holds.push(verdict.coolOffUntil);
+  if (continuityUnavailable) {
+    if (!secondChannelAt || !Number.isFinite(Date.parse(secondChannelAt))) {
+      reasons.push("old wallet unavailable: needs confirmation from a second, independently trusted channel");
+      return result("HOLD", extra);
+    }
+    const base = Math.max(Date.parse(secondChannelAt), (verdict.evidence?.control?.blockTime ?? 0) * 1000);
+    const until = base + LOST_WALLET_HOLD_H * 3600 * 1000;
+    if (until > now) holds.push(new Date(until).toISOString());
+  }
+  if (totalUsd7d >= CALLBACK_THRESHOLD_USD && !callbackConfirmed) {
+    reasons.push(`first contact with ${totalUsd7d} USD over ${SPLIT_WINDOW_DAYS} days needs a call-back to a phone number the user already has`);
+    return result("HOLD", { ...extra, holdUntil: holds.sort().at(-1) ?? null });
+  }
+  if (holds.length) {
+    const holdUntil = holds.sort().at(-1);
+    reasons.push(`hold until ${holdUntil}`);
+    return result("HOLD", { ...extra, holdUntil });
+  }
+  reasons.push(continuityUnavailable ? "control proven, second channel confirmed, hold elapsed" : "control proven and cool-off elapsed");
+  return result("ALLOW_WITH_USER_APPROVAL", extra);
+}
+
 // ---------- signing (payee test helper + anchor) ----------
 const PKCS8_ED25519 = Buffer.from("302e020100300506032b657004220420", "hex");
 export async function loadKeypair(path) {
@@ -497,6 +579,21 @@ async function main() {
       if (args.out) await writeFile(args.out, `${JSON.stringify(result, null, 2)}\n`);
       return out(result);
     }
+    case "gate": {
+      need(args, "verdictFile", "amountUsd");
+      const result = gate({
+        verdict: await readJson(args.verdictFile),
+        amountUsd: args.amountUsd,
+        paymentCluster: args.paymentCluster,
+        destination: args.destination,
+        history: args.historyFile ? await readJson(args.historyFile) : [],
+        callbackConfirmed: args.callbackConfirmed === true,
+        continuityUnavailable: args.continuityUnavailable === true,
+        secondChannelAt: args.secondChannelAt,
+      });
+      if (args.out) await writeFile(args.out, `${JSON.stringify(result, null, 2)}\n`);
+      return out(result, { ALLOW_WITH_USER_APPROVAL: 0, HOLD: 2, BLOCK: 3 }[result.decision]);
+    }
     case "anchor": {
       need(args, "receiptFile", "keypair");
       if (mainnet && !args.allowMainnet) throw new Error("anchoring on mainnet needs --allow-mainnet");
@@ -528,7 +625,7 @@ async function main() {
       return out({ type: "countersig.keygen", address: b58encode(pub), path: args.out, note: "throwaway key for devnet testing only" });
     }
     default:
-      throw new Error("usage: countersig.mjs <challenge|verify|receipt|anchor|sign|keygen> [--flags]");
+      throw new Error("usage: countersig.mjs <challenge|verify|gate|receipt|anchor|sign|keygen> [--flags]");
   }
 }
 

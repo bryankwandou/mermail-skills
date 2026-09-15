@@ -11,7 +11,8 @@
 7. `list_folders`; `create_folder` `Countersig Hold` if missing; `move_email` the change request there.
 8. On the user's next request, run `verify --known <every wallet already on file>`.
 9. `receipt`, then `save_draft` to the mailbox itself with the receipt subject and text.
-10. For `VERIFIED_CONTINUITY`, `move_email` to `Countersig Verified` and tell the user the address may be used with `mermail-agent-wallet` on the proven cluster.
+10. When the user asks to pay, run `gate --verdict-file verdict-<nonce>.json --amount-usd <user amount> --payment-cluster <cluster> --destination <address the user is about to pay>`. Only `ALLOW_WITH_USER_APPROVAL` may continue.
+11. For `VERIFIED_CONTINUITY`, `move_email` to `Countersig Verified` and tell the user the address may be used with `mermail-agent-wallet` on the proven cluster.
 
 ## First contact: a new payee
 
