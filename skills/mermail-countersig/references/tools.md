@@ -58,7 +58,7 @@ Exit codes: `0` verified or success, `2` pending, `3` hard stop, `1` usage or ne
 - The address is a signer of that transaction.
 - An SPL Memo instruction (`MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`) equals the expected memo exactly.
 - Block time is between `issuedAt` minus 5 minutes and `expiresAt`.
-- The newest 200 signatures of each wallet are scanned in full, so a conflicting endorsement is found even when a correct one also exists.
+- Each wallet's history is paged back to the start of the window (up to 10,000 signatures) and scanned in full, so a conflicting endorsement is found even when a correct one also exists. If the budget runs out first, the verdict is `PENDING`, never verified.
 
 ### Troubleshooting
 
