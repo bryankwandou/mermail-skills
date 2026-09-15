@@ -59,3 +59,17 @@ Exit codes: `0` verified or success, `2` pending, `3` hard stop, `1` usage or ne
 - An SPL Memo instruction (`MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`) equals the expected memo exactly.
 - Block time is between `issuedAt` minus 5 minutes and `expiresAt`.
 - The newest 200 signatures of each wallet are scanned in full, so a conflicting endorsement is found even when a correct one also exists.
+
+### Troubleshooting
+
+| Symptom | Cause | What to do |
+| --- | --- | --- |
+| `countersig.error` with `RPC HTTP 429` or `RPC HTTP 5xx` | Public Solana or Base RPC rate limit; the script already retries four times | Wait, then run `verify` once more, or pass `--rpc <dedicated endpoint>`. Never loop |
+| `PENDING` with `missing: complete history of the prior wallet` | More transactions in the window than the scan budget (possible flooding) | Retry with a dedicated RPC via `--rpc`. Do not treat it as verified |
+| `PENDING` on Base although the payee says they signed | No hash given, a hash from another sender, a transaction without the Base chain id, or not yet mined | Ask the payee for the hash of the self-send from the claimed wallet and pass `--control-tx` / `--rotation-tx` |
+| `EXPIRED` | Proofs landed after `expiresAt` | Issue a new challenge with a new nonce and fresh approval; never extend the old window |
+| `INVALID_INPUT` about the nonce | Nonce copied with dashes or lowercase from the email | Use the `nonce` field from the challenge record file, not the formatted code in the subject |
+| `receipt-check` returns `untrusted` for our own receipt | Body saved without the `Receipt data:` line, edited, or passed with `--origin inbound` | Re-create the receipt with `receipt`; pass `--origin draft` or `sent` only for our own mail |
+| `gate` returns `HOLD` with "verdict is older than 24 h" | The verdict file is stale | Run `verify` again, then `gate` |
+| `npm test` reports "missing YAML frontmatter" for every skill on Windows | Git `core.autocrlf` rewrote files with CRLF | Clone with `git -c core.autocrlf=false clone ...`; the repository files are LF |
+| No output from `node scripts/countersig.mjs` when imported | The CLI runs only when the file is the entry point | Call the exported functions (`verify`, `gate`, `receipt`, `checkReceipt`) from your code |
