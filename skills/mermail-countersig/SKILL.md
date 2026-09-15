@@ -27,6 +27,20 @@ Countersig climbs a three-rung trust ladder:
 
 L1 alone never unlocks payment: an address poisoner or a mailbox thief can sign with their own key. L3 is what defeats a hijacked vendor mailbox, because the thief does not hold the old wallet.
 
+## What the user actually does
+
+The workflow below is long so the agent cannot skip a step. For the user it is short:
+
+1. **Approve one email.** The agent shows the challenge it will send to the vendor's long-trusted address.
+2. **Wait for the vendor.** They open the signer link and approve one or two wallet prompts (Solana), or reply with the transaction hash (Base). No funds move.
+3. **Read one line.** `VERIFIED_CONTINUITY, payable on mainnet-beta` or `MISMATCH, blocked`, with explorer links.
+
+When the user later asks to pay, the agent runs `gate` and hands the address to `mermail-agent-wallet`, which asks for its own approval.
+
+**The prior wallet is needed only once.** The first payment to a new vendor goes through `VERIFIED_CHANNEL`; its receipt is saved as a draft and becomes the prior wallet for every later rotation. From then on each change is proven by continuity automatically.
+
+**The first-contact hold is not always 24 hours.** A call-back to a phone number the user already had replaces the cool-off (`gate --callback-confirmed`). Without one, the hold ends by itself.
+
 ## Chains
 
 | Cluster | Proof transaction | How verify finds it |
@@ -85,8 +99,8 @@ The `gate` command enforces these defaults, so the policy does not depend on the
 | Amount the user intends to pay | Minimum verdict | Extra condition |
 | --- | --- | --- |
 | Any amount to a changed wallet | `VERIFIED_CONTINUITY` | Proof chain equals payment chain |
-| First contact, under 1,000 USD equivalent | `VERIFIED_CHANNEL` | After `coolOffUntil`, with user approval |
-| First contact, 1,000 USD or more | `VERIFIED_CHANNEL` | After `coolOffUntil` and a call-back to a phone number the user already has, noted in the receipt |
+| First contact, under 1,000 USD equivalent | `VERIFIED_CHANNEL` | After `coolOffUntil`, or earlier with a call-back, and with user approval |
+| First contact, 1,000 USD or more | `VERIFIED_CHANNEL` | A call-back to a phone number the user already has, noted in the receipt; the call-back also replaces the cool-off |
 | Any amount after `MISMATCH` or `LOOKALIKE` | none | Blocked; a fresh challenge needs a new nonce and the user's explicit restart |
 
 Split payments count as one amount: sum every transfer to the same counterparty within 7 days.
