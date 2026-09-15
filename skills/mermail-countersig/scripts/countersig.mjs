@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // Countersig: prove a payout wallet before an agent pays it.
-// Zero dependencies. Node.js 22+. Reads Solana JSON-RPC; writes only when `sign` or `anchor` is called.
+// Zero dependencies. Node.js 22+. Reads Solana or Base JSON-RPC; writes only when `sign` or `anchor` is called.
+// Chains: devnet | testnet | mainnet-beta (Solana memo program) and base-sepolia | base (EVM: 0-value self-send, memo as calldata).
 //
 //   node countersig.mjs challenge --claimed <addr> --channel <email> --counterparty <name> [--prior <addr>] [--cluster devnet]
 //   node countersig.mjs verify    --claimed <addr> --nonce <nonce> --issued-at <iso> --expires-at <iso> [--prior <addr>] [--known a,b] [--cluster devnet]
+//                                 [--control-tx <hash>] [--rotation-tx <hash>]   (Base only: EVM RPC cannot list txs by address)
 //   node countersig.mjs receipt   --verdict-file <verify.json> --challenge-file <challenge.json>
 //   node countersig.mjs anchor    --receipt-file <receipt.json> --keypair <path> [--cluster devnet]
 //   node countersig.mjs sign      --keypair <path> --memo <text> [--cluster devnet]      (payee side, for testing)
-//   node countersig.mjs keygen    --out <path>                                            (throwaway devnet key)
+//   node countersig.mjs keygen    --out <path> [--cluster base-sepolia]                   (throwaway test key)
 //
 // Output is always one JSON object on stdout.
 // Exit codes: 0 verified or command succeeded, 2 pending / not proven, 3 hard stop, 1 usage or network error.
@@ -15,6 +17,7 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import process from "node:process";
+import { EVM_CHAINS, evmExplorer, findEvmProof, isEvmAddress, isEvmChain, loadEvmKey, newEvmKey, sendEvmMemo } from "./evm.mjs";
 
 export const VERSION = "v1";
 export const MEMO_PROGRAM = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
@@ -93,10 +96,13 @@ export const receiptMemo = (sha256) => `countersig:${VERSION}:receipt:${sha256}`
 
 // ---------- lookalike ----------
 export function lookalikes(claimed, known) {
-  return known.filter(
-    (k) => k && k !== claimed && k.slice(0, 4) === claimed.slice(0, 4) && k.slice(-4) === claimed.slice(-4),
-  );
+  const norm = (a) => (isEvmAddress(a) ? a.slice(2).toLowerCase() : a);
+  const c = norm(claimed);
+  return known.filter((k) => k && norm(k) !== c && norm(k).slice(0, 4) === c.slice(0, 4) && norm(k).slice(-4) === c.slice(-4));
 }
+export const chainLabel = (cluster) => (isEvmChain(cluster) ? (cluster === "base" ? "Base" : "Base Sepolia") : `Solana ${cluster}`);
+const validAddress = (cluster, a) => (isEvmChain(cluster) ? isEvmAddress(a) : isSolanaAddress(a));
+const sameAddress = (a, b) => (isEvmAddress(a) && isEvmAddress(b) ? a.toLowerCase() === b.toLowerCase() : a === b);
 
 // ---------- RPC ----------
 async function rpc(url, method, params) {
@@ -168,12 +174,13 @@ export async function findMemoProof({ rpcUrl, address, expected, notBefore, notA
 }
 
 export const explorer = (signature, cluster) =>
-  `https://explorer.solana.com/tx/${signature}${cluster === "mainnet-beta" ? "" : `?cluster=${cluster}`}`;
+  isEvmChain(cluster) ? evmExplorer(signature, cluster) : `https://explorer.solana.com/tx/${signature}${cluster === "mainnet-beta" ? "" : `?cluster=${cluster}`}`;
 
 // ---------- verdict ----------
 export async function verify(input) {
   const cluster = input.cluster ?? "devnet";
-  const rpcUrl = input.rpc ?? RPC[cluster];
+  const rpcUrl = input.rpc ?? RPC[cluster] ?? EVM_CHAINS[cluster]?.rpc;
+  const evm = isEvmChain(cluster);
   const claimed = input.claimed?.trim();
   const prior = input.prior?.trim() || null;
   const known = [...new Set([...(input.known ?? []), ...(prior ? [prior] : [])])];
@@ -194,13 +201,14 @@ export async function verify(input) {
   const done = (verdict, extra = {}) => ({ ...base, verdict, payable: verdict === "VERIFIED_CONTINUITY", ...extra });
 
   if (!rpcUrl) return done("INVALID_INPUT", { reason: `unknown cluster ${cluster}` });
-  if (!isSolanaAddress(claimed)) return done("INVALID_ADDRESS", { reason: "claimed address is not a 32-byte base58 Solana public key" });
-  if (prior && !isSolanaAddress(prior)) return done("INVALID_ADDRESS", { reason: "prior address is not a valid Solana public key" });
+  const kind = evm ? "0x-prefixed 20-byte EVM address" : "32-byte base58 Solana public key";
+  if (!validAddress(cluster, claimed)) return done("INVALID_ADDRESS", { reason: `claimed address is not a ${kind}` });
+  if (prior && !validAddress(cluster, prior)) return done("INVALID_ADDRESS", { reason: `prior address is not a ${kind}` });
   if (!/^[0-9A-Z]{16}$/.test(input.nonce ?? "")) return done("INVALID_INPUT", { reason: "nonce must be the 16-character challenge nonce" });
   if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || expiresAt <= issuedAt) {
     return done("INVALID_INPUT", { reason: "issued-at and expires-at must be ISO timestamps with expires-at after issued-at" });
   }
-  if (prior && prior === claimed) return done("UNCHANGED", { reason: "claimed address equals the prior verified wallet; no rotation to prove" });
+  if (prior && sameAddress(prior, claimed)) return done("UNCHANGED", { reason: "claimed address equals the prior verified wallet; no rotation to prove" });
 
   const collisions = lookalikes(claimed, known);
   if (collisions.length) {
@@ -211,17 +219,21 @@ export async function verify(input) {
   }
 
   const windowEnd = Math.min(now, expiresAt);
-  const control = await findMemoProof({ rpcUrl, address: claimed, expected: controlMemo(input.nonce), notBefore: issuedAt, notAfter: windowEnd });
+  const find = (address, expected, txHash) =>
+    evm
+      ? findEvmProof({ cluster, rpcUrl, address, expected, txHash, notBefore: issuedAt, notAfter: windowEnd, clockSkew: CLOCK_SKEW_S })
+      : findMemoProof({ rpcUrl, address, expected, notBefore: issuedAt, notAfter: windowEnd });
+  const control = await find(claimed, controlMemo(input.nonce), input.controlTx);
   let rotation = null;
   if (prior) {
-    rotation = await findMemoProof({ rpcUrl, address: prior, expected: rotateMemo(input.nonce, claimed), notBefore: issuedAt, notAfter: windowEnd });
+    rotation = await find(prior, rotateMemo(input.nonce, claimed), input.rotationTx);
     // Any conflicting endorsement for this nonce blocks payment, even if the expected one also exists.
     const wrongTarget = rotation.nearMisses.find(
       (miss) =>
         miss.signedByAddress &&
         miss.succeeded &&
         miss.memo?.startsWith(`countersig:${VERSION}:${input.nonce}:rotate:`) &&
-        miss.memo !== rotateMemo(input.nonce, claimed),
+        !sameAddress(miss.memo.split(":rotate:")[1] ?? "", claimed),
     );
     if (wrongTarget) {
       return done("MISMATCH", {
@@ -248,15 +260,18 @@ export async function verify(input) {
     });
   }
   if (now > expiresAt) return done("EXPIRED", { evidence, trustLadder, reason: "challenge window closed before every required proof landed" });
-  const missing = [!control.found && "control memo from the claimed wallet", prior && !rotation.found && "rotation memo from the prior wallet"].filter(Boolean);
+  const hashNote = evm ? " (reply with its transaction hash)" : "";
+  const missing = [!control.found && `control memo from the claimed wallet${hashNote}`, prior && !rotation.found && `rotation memo from the prior wallet${hashNote}`].filter(Boolean);
   return done("PENDING", { evidence, trustLadder, missing, reason: `waiting for: ${missing.join(" and ")}` });
 }
 const withLink = (evidence, cluster) => ({ ...evidence, explorer: explorer(evidence.signature, cluster) });
 
 // ---------- challenge ----------
 export function challenge({ claimed, channel, counterparty, prior, cluster = "devnet", ttlHours = 72, signerBase = DEFAULT_SIGNER_BASE, now = Date.now() }) {
-  if (!isSolanaAddress(claimed)) throw new Error("claimed address is not a valid Solana public key");
-  if (prior && !isSolanaAddress(prior)) throw new Error("prior address is not a valid Solana public key");
+  if (!RPC[cluster] && !isEvmChain(cluster)) throw new Error(`unknown cluster ${cluster}`);
+  const evm = isEvmChain(cluster);
+  if (!validAddress(cluster, claimed)) throw new Error(`claimed address is not a valid ${evm ? "EVM" : "Solana"} address`);
+  if (prior && !validAddress(cluster, prior)) throw new Error(`prior address is not a valid ${evm ? "EVM" : "Solana"} address`);
   if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(channel ?? "")) throw new Error("channel must be one plain email address");
   const nonce = newNonce();
   const issuedAt = new Date(now).toISOString();
@@ -269,25 +284,29 @@ export function challenge({ claimed, channel, counterparty, prior, cluster = "de
   const short = (a) => `${a.slice(0, 4)}...${a.slice(-4)}`;
   const who = counterparty || channel;
   const subject = `Confirm your payout wallet ${short(claimed)} (code ${nonce.slice(0, 4)}-${nonce.slice(4, 8)})`;
+  const how = evm ? "send a 0 ETH transaction to itself whose data field is this exact text" : "send a transaction with this exact memo";
+  const hex = (m) => `0x${Buffer.from(m, "utf8").toString("hex")}`;
   const steps = [
-    `1. From the wallet ${claimed}, send a transaction with this exact memo:`,
+    `1. From the wallet ${claimed}, ${how}:`,
     `   ${memoControl}`,
+    ...(evm ? [`   (hex data: ${hex(memoControl)})`] : []),
     ...(prior
       ? [
-          `2. From the wallet we paid before, ${prior}, send a second transaction with this exact memo:`,
+          `2. From the wallet we paid before, ${prior}, ${how}:`,
           `   ${memoRotate}`,
+          ...(evm ? [`   (hex data: ${hex(memoRotate)})`] : []),
         ]
       : []),
   ];
   const text = [
     `Hi ${who},`,
     "",
-    `We received a request to send future payments to ${claimed} on Solana ${cluster}.`,
+    `We received a request to send future payments to ${claimed} on ${chainLabel(cluster)}.`,
     "Before we change anything, we need the wallet itself to confirm it. No funds move, and you only pay the network fee.",
     "",
     ...steps,
     "",
-    `Easiest route: open ${signUrl} and approve in Phantom, Solflare or Backpack.`,
+    evm ? "Then reply to this email with the transaction hash (or hashes). Only the hash, never a key." : `Easiest route: open ${signUrl} and approve in Phantom, Solflare or Backpack.`,
     `This code expires at ${expiresAt}. If you did not ask for a change, do not sign anything and reply to let us know.`,
     "",
     "We will never ask you for a seed phrase, private key or a test payment.",
@@ -295,11 +314,11 @@ export function challenge({ claimed, channel, counterparty, prior, cluster = "de
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const html = `<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:15px;line-height:1.55;color:#111">
 <p>Hi ${esc(who)},</p>
-<p>We received a request to send future payments to <code>${esc(claimed)}</code> on Solana ${esc(cluster)}. Before we change anything, the wallet itself needs to confirm it. No funds move; you only pay the network fee.</p>
-<ol><li>From <code>${esc(claimed)}</code>, send a transaction with the memo <code>${esc(memoControl)}</code></li>${
-    prior ? `<li>From the wallet we paid before, <code>${esc(prior)}</code>, send a transaction with the memo <code>${esc(memoRotate)}</code></li>` : ""
+<p>We received a request to send future payments to <code>${esc(claimed)}</code> on ${esc(chainLabel(cluster))}. Before we change anything, the wallet itself needs to confirm it. No funds move; you only pay the network fee.</p>
+<ol><li>From <code>${esc(claimed)}</code>, ${how}: <code>${esc(memoControl)}</code></li>${
+    prior ? `<li>From the wallet we paid before, <code>${esc(prior)}</code>, ${how}: <code>${esc(memoRotate)}</code></li>` : ""
   }</ol>
-<p><a href="${esc(signUrl)}">Open the Countersig signer</a> to do this in Phantom, Solflare or Backpack.</p>
+${evm ? "<p>Then reply with the transaction hash (or hashes). Only the hash, never a key.</p>" : `<p><a href="${esc(signUrl)}">Open the Countersig signer</a> to do this in Phantom, Solflare or Backpack.</p>`}
 <p>The code expires at ${esc(expiresAt)}. If you did not request a change, do not sign and reply to tell us.</p>
 <p style="color:#555">We will never ask for a seed phrase, private key or a test payment.</p></div>`;
   return {
@@ -315,7 +334,7 @@ export function challenge({ claimed, channel, counterparty, prior, cluster = "de
     expiresAt,
     memoControl,
     memoRotate,
-    signUrl,
+    signUrl: evm ? null : signUrl,
     email: { to: channel, subject, text, html },
   };
 }
@@ -447,7 +466,8 @@ const readJson = async (path) => JSON.parse((await readFile(path, "utf8")).repla
 async function main() {
   const { command, args } = parseArgs(process.argv.slice(2));
   const cluster = args.cluster ?? "devnet";
-  if (args.cluster && !RPC[cluster]) throw new Error(`--cluster must be one of ${Object.keys(RPC).join(", ")}`);
+  if (args.cluster && !RPC[cluster] && !isEvmChain(cluster)) throw new Error(`--cluster must be one of ${[...Object.keys(RPC), ...Object.keys(EVM_CHAINS)].join(", ")}`);
+  const mainnet = cluster === "mainnet-beta" || cluster === "base";
   const out = (value, code = 0) => {
     process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
     process.exitCode = code;
@@ -479,20 +499,28 @@ async function main() {
     }
     case "anchor": {
       need(args, "receiptFile", "keypair");
-      if (cluster === "mainnet-beta" && !args.allowMainnet) throw new Error("anchoring on mainnet needs --allow-mainnet");
+      if (mainnet && !args.allowMainnet) throw new Error("anchoring on mainnet needs --allow-mainnet");
       const file = await readJson(args.receiptFile);
       const sha = file.sha256 ?? createHash("sha256").update(canonical(file.receipt ?? file)).digest("hex");
-      const sent = await sendMemo({ keypair: await loadKeypair(args.keypair), memo: receiptMemo(sha), cluster, rpcUrl: args.rpc });
+      const sent = isEvmChain(cluster)
+        ? await sendEvmMemo({ key: await loadEvmKey(args.keypair), memo: receiptMemo(sha), cluster, rpcUrl: args.rpc })
+        : await sendMemo({ keypair: await loadKeypair(args.keypair), memo: receiptMemo(sha), cluster, rpcUrl: args.rpc });
       return out({ type: "countersig.anchor", sha256: sha, ...sent });
     }
     case "sign": {
       need(args, "keypair", "memo");
-      if (cluster === "mainnet-beta" && !args.allowMainnet) throw new Error("signing on mainnet needs --allow-mainnet");
+      if (mainnet && !args.allowMainnet) throw new Error("signing on mainnet needs --allow-mainnet");
       if (!String(args.memo).startsWith(`countersig:${VERSION}:`)) throw new Error("sign only sends Countersig memos");
+      if (isEvmChain(cluster)) return out({ type: "countersig.signed", ...(await sendEvmMemo({ key: await loadEvmKey(args.keypair), memo: args.memo, cluster, rpcUrl: args.rpc })) });
       return out({ type: "countersig.signed", ...(await sendMemo({ keypair: await loadKeypair(args.keypair), memo: args.memo, cluster, rpcUrl: args.rpc })) });
     }
     case "keygen": {
       need(args, "out");
+      if (isEvmChain(cluster)) {
+        const key = newEvmKey();
+        await writeFile(args.out, JSON.stringify({ privateKey: key.privateKey }));
+        return out({ type: "countersig.keygen", address: key.address, path: args.out, note: "throwaway key for Base Sepolia testing only" });
+      }
       const { privateKey, publicKey } = generateKeyPairSync("ed25519");
       const seed = privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32);
       const pub = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
